@@ -243,33 +243,36 @@ app.use((req, res) => {
   });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📡 Frontend URL: ${FRONTEND_URL}`);
-  console.log(`💾 Database: Connected`);
-});
-
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  server.close(async () => {
-    console.log('HTTP server closed');
-    await prisma.$disconnect();
-    process.exit(0);
+let server;
+if (!process.env.VERCEL) {
+  server = app.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`📡 Frontend URL: ${FRONTEND_URL}`);
+    console.log(`💾 Database: Connected`);
   });
-});
 
-process.on('SIGINT', async () => {
-  console.log('\nSIGINT signal received: closing HTTP server');
-  server.close(async () => {
-    console.log('HTTP server closed');
-    await prisma.$disconnect();
-    process.exit(0);
+  process.on('SIGTERM', async () => {
+    console.log('SIGTERM signal received: closing HTTP server');
+    server.close(async () => {
+      console.log('HTTP server closed');
+      await prisma.$disconnect();
+      process.exit(0);
+    });
   });
-});
 
-process.on('beforeExit', async () => {
-  await prisma.$disconnect();
-});
+  process.on('SIGINT', async () => {
+    console.log('\nSIGINT signal received: closing HTTP server');
+    server.close(async () => {
+      console.log('HTTP server closed');
+      await prisma.$disconnect();
+      process.exit(0);
+    });
+  });
+
+  process.on('beforeExit', async () => {
+    await prisma.$disconnect();
+  });
+}
 
 export default app;
 
