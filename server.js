@@ -12,12 +12,28 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const FRONTEND_URLS = (process.env.FRONTEND_URLS || FRONTEND_URL)
+  .split(',')
+  .map(v => v.trim())
+  .filter(Boolean);
+const allowAll = FRONTEND_URLS.includes('*');
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowAll) return callback(null, true);
+    if (FRONTEND_URLS.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204
+};
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
-app.use(cors({
-  origin: FRONTEND_URL,
-  credentials: true
-}));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
