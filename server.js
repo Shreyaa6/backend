@@ -13,7 +13,7 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const FRONTEND_URLS = (process.env.FRONTEND_URLS || FRONTEND_URL)
+const FRONTEND_URLS = (process.env.FRONTEND_URLS || `${FRONTEND_URL},https://frontend-five-delta-84.vercel.app`)
   .split(',')
   .map(v => v.trim())
   .filter(Boolean);
@@ -26,6 +26,15 @@ const corsOptions = {
     
     // Allow all in development mode or if explicitly set
     const isDevelopment = !process.env.NODE_ENV || process.env.NODE_ENV === 'development';
+    
+    // Always allow Vercel frontend URLs (with or without www, and any subdomain)
+    const vercelFrontendUrl = 'https://frontend-five-delta-84.vercel.app';
+    if (origin === vercelFrontendUrl || 
+        origin.startsWith(vercelFrontendUrl) ||
+        origin.includes('vercel.app')) {
+      return callback(null, true);
+    }
+    
     if (allowAll || isDevelopment) {
       return callback(null, true);
     }
@@ -46,10 +55,15 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 204
 };
-const JWT_SECRET = process.env.JWT_SECRET;
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY ;
-const EXCHANGE_API_KEY = process.env.EXCHANGE_API_KEY ;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+const EXCHANGE_API_KEY = process.env.EXCHANGE_API_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+
+// Validate required environment variables
+if (!JWT_SECRET || JWT_SECRET === 'your-secret-key-change-in-production') {
+  console.warn('Warning: JWT_SECRET is not set or using default value. Please set a secure JWT_SECRET in production.');
+}
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -149,6 +163,10 @@ app.post('/api/auth/signup', async (req, res) => {
       }
     });
 
+    if (!JWT_SECRET) {
+      throw new Error('JWT_SECRET is not configured');
+    }
+
     const token = jwt.sign(
       { userId: user.id, email: user.email },
       JWT_SECRET,
@@ -223,10 +241,43 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (error) {
     console.error('Login error:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error code:', error.code);
+    console.error('Error message:', error.message);
+
+    // Check for specific database errors
+    if (error.code === 'P1001' || error.message?.includes('Can\'t reach database server')) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection failed. Please check your DATABASE_URL and ensure MySQL is running.',
+        error: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.message : undefined
+      });
+    }
+    
+    // Check for JWT_SECRET errors
+    if (error.message?.includes('secret') || error.message?.includes('JWT')) {
+      return res.status(500).json({
+        success: false,
+        message: 'Authentication configuration error. Please check JWT_SECRET.',
+        error: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.message : undefined
+      });
+    }
+    
+    // Check for Prisma errors
+    if (error.code?.startsWith('P')) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database error occurred',
+        error: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.message : undefined,
+        code: error.code
+      });
+    }
+    
     res.status(500).json({ 
       success: false, 
       message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      error: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.message : undefined,
+      stack: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.stack : undefined
     });
   }
 });
