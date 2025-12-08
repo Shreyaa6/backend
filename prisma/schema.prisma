@@ -14,6 +14,46 @@ model User {
   password  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  trips     Trip[]
+  budgets   Budget[]
 
   @@map("users")
+}
+
+model Trip {
+  id                Int      @id @default(autoincrement())
+  userId            Int
+  destination       String
+  transportationType String  // flight, train, bus, car
+  transportationData Json?  // Store booking details
+  hotelData         Json?   // Store hotel booking details
+  startDate         DateTime
+  endDate           DateTime
+  travelers         Int      @default(1)
+  status            String   @default("upcoming") // upcoming, past, cancelled
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  budgets           Budget[]
+
+  @@map("trips")
+}
+
+model Budget {
+  id                Int      @id @default(autoincrement())
+  userId            Int
+  tripId            Int?
+  name              String   @default("My Budget")
+  accommodation     Float    @default(0)
+  food              Float    @default(0)
+  transportation    Float    @default(0)
+  activities        Float    @default(0)
+  miscellaneous     Float    @default(0)
+  currency          String   @default("USD")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trip              Trip?    @relation(fields: [tripId], references: [id], onDelete: SetNull)
+
+  @@map("budgets")
 }

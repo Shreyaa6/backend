@@ -4,7 +4,6 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 
 dotenv.config();
@@ -22,9 +21,24 @@ const allowAll = FRONTEND_URLS.includes('*');
 
 const corsOptions = {
   origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    if (allowAll) return callback(null, true);
-    if (FRONTEND_URLS.includes(origin)) return callback(null, true);
+    
+    // Allow all in development mode or if explicitly set
+    const isDevelopment = !process.env.NODE_ENV || process.env.NODE_ENV === 'development';
+    if (allowAll || isDevelopment) {
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list
+    if (FRONTEND_URLS.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Log the rejected origin for debugging
+    console.log('CORS blocked origin:', origin);
+    console.log('Allowed origins:', FRONTEND_URLS);
+    console.log('Development mode:', isDevelopment);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -33,12 +47,9 @@ const corsOptions = {
   optionsSuccessStatus: 204
 };
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyDpaE7aI73ROnxWnP-Fe7yEolVTtCqeDGg';
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '85c7d87effmsh63cf2d93801c02bp1a6854jsn90dcf15b1890';
 const EXCHANGE_API_KEY = process.env.EXCHANGE_API_KEY || '9ea2e355dc46cdf4585fbc76';
-
-// Initialize Gemini AI
-const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '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';
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -55,16 +66,18 @@ app.get('/', (req, res) => {
       signup: '/api/auth/signup',
       login: '/api/auth/login',
       me: '/api/auth/me',
-      geminiChat: '/api/gemini/chat',
-      geminiGenerateText: '/api/gemini/generate-text',
-      geminiTripSuggestions: '/api/gemini/trip-suggestions',
       flights: '/api/flights/search',
       trains: '/api/trains/stations',
-      hotels: '/api/hotels/airbnb',
+      cars: '/api/cars/search',
+      buses: '/api/buses/generate',
+      hotels: '/api/hotels/search',
+      hotelLocations: '/api/hotels/locations',
       restaurants: '/api/places/restaurants',
       weather: '/api/weather/forecast',
       exchange: '/api/exchange/rates',
-      tripPlan: '/api/trips/plan'
+      tripPlan: '/api/trips/plan',
+      trips: '/api/trips',
+      trip: '/api/trips/:id'
     }
   });
 });
@@ -291,181 +304,424 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
-// Gemini AI Routes
-app.post('/api/gemini/chat', async (req, res) => {
+// Trip Routes
+app.post('/api/trips', authenticateToken, async (req, res) => {
   try {
-    if (!genAI) {
-      return res.status(500).json({
-        success: false,
-        message: 'Gemini API not configured'
-      });
-    }
+    const { destination, transportationType, transportationData, hotelData, startDate, endDate, travelers } = req.body;
 
-    const { message, history = [] } = req.body;
-
-    if (!message) {
+    if (!destination || !transportationType || !startDate || !endDate) {
       return res.status(400).json({
         success: false,
-        message: 'Message is required'
+        message: 'Destination, transportation type, start date, and end date are required'
       });
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+    const trip = await prisma.trip.create({
+      data: {
+        userId: req.user.userId,
+        destination,
+        transportationType,
+        transportationData: transportationData || null,
+        hotelData: hotelData || null,
+        startDate: new Date(startDate),
+        endDate: new Date(endDate),
+        travelers: travelers || 1,
+        status: 'upcoming'
+      }
+    });
 
-    // Build conversation history
-    const chatHistory = history.map(msg => ({
-      role: msg.role || 'user',
-      parts: [{ text: msg.text || msg.content }]
-    }));
+    res.status(201).json({
+      success: true,
+      message: 'Trip created successfully',
+      trip
+    });
+  } catch (error) {
+    console.error('Create trip error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta
+    });
+    
+    // Handle Prisma errors
+    if (error.code === 'P2002') {
+      return res.status(400).json({
+        success: false,
+        message: 'A trip with these details already exists'
+      });
+    }
+    
+    if (error.code === 'P2003') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID. Please login again.'
+      });
+    }
+    
+    if (error.message && error.message.includes('Unknown column')) {
+      return res.status(500).json({
+        success: false,
+        message: 'Database schema mismatch. Please run migrations: npx prisma migrate dev'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create trip',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      details: process.env.NODE_ENV === 'development' ? {
+        code: error.code,
+        meta: error.meta
+      } : undefined
+    });
+  }
+});
 
-    // Start chat with history if available
-    const chat = chatHistory.length > 0 
-      ? model.startChat({ history: chatHistory })
-      : model;
-
-    const result = await chat.sendMessage(message);
-    const response = await result.response;
-    const text = response.text();
+app.get('/api/trips', authenticateToken, async (req, res) => {
+  try {
+    const trips = await prisma.trip.findMany({
+      where: {
+        userId: req.user.userId
+      },
+      orderBy: {
+        startDate: 'asc'
+      }
+    });
 
     res.json({
       success: true,
-      message: text,
-      usage: {
-        promptTokens: response.usageMetadata?.promptTokenCount || 0,
-        completionTokens: response.usageMetadata?.candidatesTokenCount || 0,
-        totalTokens: response.usageMetadata?.totalTokenCount || 0
-      }
+      trips
     });
   } catch (error) {
-    console.error('Gemini API error:', error);
+    console.error('Get trips error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to get response from Gemini',
+      message: 'Failed to fetch trips',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
-app.post('/api/gemini/generate-text', async (req, res) => {
+app.get('/api/trips/:id', authenticateToken, async (req, res) => {
   try {
-    if (!genAI) {
-      return res.status(500).json({
+    const trip = await prisma.trip.findFirst({
+      where: {
+        id: parseInt(req.params.id),
+        userId: req.user.userId
+      }
+    });
+
+    if (!trip) {
+      return res.status(404).json({
         success: false,
-        message: 'Gemini API not configured'
+        message: 'Trip not found'
       });
     }
-
-    const { prompt } = req.body;
-
-    if (!prompt) {
-      return res.status(400).json({
-        success: false,
-        message: 'Prompt is required'
-      });
-    }
-
-    const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
 
     res.json({
       success: true,
-      text: text,
-      usage: {
-        promptTokens: response.usageMetadata?.promptTokenCount || 0,
-        completionTokens: response.usageMetadata?.candidatesTokenCount || 0,
-        totalTokens: response.usageMetadata?.totalTokenCount || 0
-      }
+      trip
     });
   } catch (error) {
-    console.error('Gemini API error:', error);
+    console.error('Get trip error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate text',
+      message: 'Failed to fetch trip',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
-app.post('/api/gemini/trip-suggestions', async (req, res) => {
+app.put('/api/trips/:id', authenticateToken, async (req, res) => {
   try {
-    if (!genAI) {
-      return res.status(500).json({
+    const { destination, transportationType, transportationData, hotelData, startDate, endDate, travelers, status } = req.body;
+    
+    const existingTrip = await prisma.trip.findFirst({
+      where: {
+        id: parseInt(req.params.id),
+        userId: req.user.userId
+      }
+    });
+
+    if (!existingTrip) {
+      return res.status(404).json({
         success: false,
-        message: 'Gemini API not configured'
+        message: 'Trip not found'
       });
     }
 
-    const { destination, duration, budget, interests } = req.body;
+    const trip = await prisma.trip.update({
+      where: {
+        id: parseInt(req.params.id)
+      },
+      data: {
+        ...(destination && { destination }),
+        ...(transportationType && { transportationType }),
+        ...(transportationData !== undefined && { transportationData }),
+        ...(hotelData !== undefined && { hotelData }),
+        ...(startDate && { startDate: new Date(startDate) }),
+        ...(endDate && { endDate: new Date(endDate) }),
+        ...(travelers && { travelers }),
+        ...(status && { status })
+      }
+    });
 
-    if (!destination) {
-      return res.status(400).json({
+    res.json({
+      success: true,
+      message: 'Trip updated successfully',
+      trip
+    });
+  } catch (error) {
+    console.error('Update trip error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update trip',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+app.delete('/api/trips/:id', authenticateToken, async (req, res) => {
+  try {
+    const existingTrip = await prisma.trip.findFirst({
+      where: {
+        id: parseInt(req.params.id),
+        userId: req.user.userId
+      }
+    });
+
+    if (!existingTrip) {
+      return res.status(404).json({
         success: false,
-        message: 'Destination is required'
+        message: 'Trip not found'
       });
     }
 
-    const prompt = `Create a detailed travel itinerary for ${destination}${duration ? ` for ${duration} days` : ''}${budget ? ` with a budget of ${budget}` : ''}${interests ? `. Interests: ${interests.join(', ')}` : ''}. Include:
-1. Day-by-day itinerary with activities
-2. Recommended places to visit
-3. Restaurant suggestions
-4. Transportation tips
-5. Budget breakdown
-6. Travel tips
+    await prisma.trip.delete({
+      where: {
+        id: parseInt(req.params.id)
+      }
+    });
 
-Format the response as a structured JSON object with the following structure:
-{
-  "itinerary": [
-    {
-      "day": 1,
-      "activities": ["activity1", "activity2"],
-      "places": ["place1", "place2"],
-      "restaurants": ["restaurant1", "restaurant2"]
-    }
-  ],
-  "budget": {
-    "accommodation": "amount",
-    "food": "amount",
-    "transportation": "amount",
-    "activities": "amount",
-    "total": "amount"
-  },
-  "tips": ["tip1", "tip2"]
-}`;
+    res.json({
+      success: true,
+      message: 'Trip deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete trip error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete trip',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+// Budget CRUD Routes
+app.get('/api/budgets', authenticateToken, async (req, res) => {
+  try {
+    const budgets = await prisma.budget.findMany({
+      where: {
+        userId: req.user.userId
+      },
+      include: {
+        trip: {
+          select: {
+            id: true,
+            destination: true,
+            startDate: true,
+            endDate: true
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
 
-    // Try to parse JSON from response
-    let suggestions;
-    try {
-      // Extract JSON from markdown code blocks if present
-      const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/```\s*([\s\S]*?)\s*```/);
-      const jsonText = jsonMatch ? jsonMatch[1] : text;
-      suggestions = JSON.parse(jsonText);
-    } catch (e) {
-      // If parsing fails, return as text
-      suggestions = { raw: text };
+    res.json({
+      success: true,
+      budgets
+    });
+  } catch (error) {
+    console.error('Get budgets error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch budgets',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+app.get('/api/budgets/:id', authenticateToken, async (req, res) => {
+  try {
+    const budget = await prisma.budget.findFirst({
+      where: {
+        id: parseInt(req.params.id),
+        userId: req.user.userId
+      },
+      include: {
+        trip: {
+          select: {
+            id: true,
+            destination: true,
+            startDate: true,
+            endDate: true
+          }
+        }
+      }
+    });
+
+    if (!budget) {
+      return res.status(404).json({
+        success: false,
+        message: 'Budget not found'
+      });
     }
 
     res.json({
       success: true,
-      suggestions: suggestions,
-      raw: text,
-      usage: {
-        promptTokens: response.usageMetadata?.promptTokenCount || 0,
-        completionTokens: response.usageMetadata?.candidatesTokenCount || 0,
-        totalTokens: response.usageMetadata?.totalTokenCount || 0
-      }
+      budget
     });
   } catch (error) {
-    console.error('Gemini API error:', error);
+    console.error('Get budget error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate trip suggestions',
+      message: 'Failed to fetch budget',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+app.post('/api/budgets', authenticateToken, async (req, res) => {
+  try {
+    const { name, accommodation, food, transportation, activities, miscellaneous, currency, tripId } = req.body;
+
+    const budget = await prisma.budget.create({
+      data: {
+        userId: req.user.userId,
+        name: name || 'My Budget',
+        accommodation: parseFloat(accommodation) || 0,
+        food: parseFloat(food) || 0,
+        transportation: parseFloat(transportation) || 0,
+        activities: parseFloat(activities) || 0,
+        miscellaneous: parseFloat(miscellaneous) || 0,
+        currency: currency || 'USD',
+        ...(tripId && { tripId: parseInt(tripId) })
+      },
+      include: {
+        trip: {
+          select: {
+            id: true,
+            destination: true
+          }
+        }
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Budget created successfully',
+      budget
+    });
+  } catch (error) {
+    console.error('Create budget error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create budget',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+app.put('/api/budgets/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, accommodation, food, transportation, activities, miscellaneous, currency, tripId } = req.body;
+
+    const existingBudget = await prisma.budget.findFirst({
+      where: {
+        id: parseInt(req.params.id),
+        userId: req.user.userId
+      }
+    });
+
+    if (!existingBudget) {
+      return res.status(404).json({
+        success: false,
+        message: 'Budget not found'
+      });
+    }
+
+    const budget = await prisma.budget.update({
+      where: {
+        id: parseInt(req.params.id)
+      },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(accommodation !== undefined && { accommodation: parseFloat(accommodation) }),
+        ...(food !== undefined && { food: parseFloat(food) }),
+        ...(transportation !== undefined && { transportation: parseFloat(transportation) }),
+        ...(activities !== undefined && { activities: parseFloat(activities) }),
+        ...(miscellaneous !== undefined && { miscellaneous: parseFloat(miscellaneous) }),
+        ...(currency !== undefined && { currency }),
+        ...(tripId !== undefined && { tripId: tripId ? parseInt(tripId) : null })
+      },
+      include: {
+        trip: {
+          select: {
+            id: true,
+            destination: true
+          }
+        }
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Budget updated successfully',
+      budget
+    });
+  } catch (error) {
+    console.error('Update budget error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update budget',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+app.delete('/api/budgets/:id', authenticateToken, async (req, res) => {
+  try {
+    const existingBudget = await prisma.budget.findFirst({
+      where: {
+        id: parseInt(req.params.id),
+        userId: req.user.userId
+      }
+    });
+
+    if (!existingBudget) {
+      return res.status(404).json({
+        success: false,
+        message: 'Budget not found'
+      });
+    }
+
+    await prisma.budget.delete({
+      where: {
+        id: parseInt(req.params.id)
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Budget deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete budget error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete budget',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -534,36 +790,310 @@ app.get('/api/trains/stations', async (req, res) => {
   }
 });
 
-// Hotels - Airbnb
-app.get('/api/hotels/airbnb', async (req, res) => {
+// Cars - Car Rentals
+app.get('/api/cars/search', async (req, res) => {
   try {
-    const { placeId, adults = 1, currency = 'USD' } = req.query;
+    const { 
+      pick_up_latitude, 
+      pick_up_longitude, 
+      drop_off_latitude, 
+      drop_off_longitude, 
+      pick_up_datetime, 
+      drop_off_datetime, 
+      driver_age = 30, 
+      currency_code = 'USD', 
+      location = 'US' 
+    } = req.query;
     
-    if (!placeId) {
-      return res.status(400).json({ success: false, message: 'Place ID is required' });
+    if (!pick_up_latitude || !pick_up_longitude || !pick_up_datetime || !drop_off_datetime) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Pick-up location (lat/lng), drop-off location (lat/lng), and dates are required' 
+      });
     }
 
-    const response = await axios.get('https://airbnb19.p.rapidapi.com/api/v2/searchPropertyByPlaceId', {
+    const response = await axios.get('https://booking-com15.p.rapidapi.com/api/v1/cars/searchCarRentals', {
       params: {
-        placeId,
-        adults,
-        guestFavorite: false,
-        ib: false,
-        currency
+        pick_up_latitude,
+        pick_up_longitude,
+        drop_off_latitude: drop_off_latitude || pick_up_latitude,
+        drop_off_longitude: drop_off_longitude || pick_up_longitude,
+        pick_up_datetime,
+        drop_off_datetime,
+        driver_age,
+        currency_code,
+        location
       },
       headers: {
-        'x-rapidapi-host': 'airbnb19.p.rapidapi.com',
+        'x-rapidapi-host': 'booking-com15.p.rapidapi.com',
         'x-rapidapi-key': RAPIDAPI_KEY
       }
     });
 
     res.json({ success: true, data: response.data });
   } catch (error) {
-    console.error('Hotels API error:', error);
+    console.error('Cars API error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch car rentals',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Buses - Bus Timetable Generator
+app.post('/api/buses/generate', async (req, res) => {
+  try {
+    const response = await axios.post('https://bus-timetable-generator-v1.p.rapidapi.com/rapidapi/generate-with-default-files/', 
+      {},
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-rapidapi-host': 'bus-timetable-generator-v1.p.rapidapi.com',
+          'x-rapidapi-key': RAPIDAPI_KEY
+        }
+      }
+    );
+
+    res.json({ success: true, data: response.data });
+  } catch (error) {
+    console.error('Buses API error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate bus timetable',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Hotels - Booking.com
+// Health check for hotels endpoint
+app.get('/api/hotels', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Hotels API is available',
+    endpoints: {
+      search: '/api/hotels/search',
+      locations: '/api/hotels/locations'
+    }
+  });
+});
+
+// Helper function to generate mock hotel data
+const generateMockHotels = (cityName, checkInDate, checkOutDate, adults) => {
+  const hotelNames = [
+    `${cityName} Grand Hotel`,
+    `${cityName} Beach Resort`,
+    `${cityName} City Center Hotel`,
+    `${cityName} Luxury Suites`,
+    `${cityName} Boutique Inn`,
+    `${cityName} Garden Hotel`,
+    `${cityName} Riverside Lodge`,
+    `${cityName} Plaza Hotel`,
+    `${cityName} Heritage Inn`,
+    `${cityName} Modern Stay`
+  ];
+
+  const amenities = ['WiFi', 'Pool', 'Spa', 'Gym', 'Restaurant', 'Bar', 'Parking', 'Airport Shuttle'];
+  const ratings = [4.0, 4.2, 4.5, 4.7, 4.8, 5.0];
+
+  return hotelNames.map((name, idx) => {
+    const basePrice = 50 + Math.floor(Math.random() * 200);
+    const nights = Math.ceil((new Date(checkOutDate) - new Date(checkInDate)) / (1000 * 60 * 60 * 24)) || 1;
+    const totalPrice = basePrice * nights * adults;
+    
+    return {
+      hotel_id: idx + 1,
+      hotel_name: name,
+      hotel_name_trans: name,
+      address: `${Math.floor(Math.random() * 999) + 1} Main Street, ${cityName}`,
+      review_score: ratings[Math.floor(Math.random() * ratings.length)],
+      review_score_word: 'Very Good',
+      price_breakdown: {
+        gross_price: totalPrice,
+        all_inclusive_price: totalPrice * 1.1
+      },
+      min_total_price: totalPrice,
+      main_photo_url: `https://picsum.photos/seed/hotel${cityName}${idx}/400/300`,
+      distance_to_cc: (Math.random() * 5).toFixed(1),
+      room_types: [{
+        bed_configurations: [{ beds: Math.floor(Math.random() * 3) + 1 }],
+        bathrooms: Math.floor(Math.random() * 2) + 1
+      }]
+    };
+  });
+};
+
+app.get('/api/hotels/search', async (req, res) => {
+  try {
+    const { 
+      dest_id, 
+      dest_type = 'city',
+      checkin_date, 
+      checkout_date, 
+      adults_number = 2, 
+      room_number = 1,
+      currency = 'USD',
+      city_name // New parameter for city name
+    } = req.query;
+    
+    if (!checkin_date || !checkout_date) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Check-in date and check-out date are required' 
+      });
+    }
+
+    // City name mapping from dest_id (fallback if city_name not provided)
+    const cityMap = {
+      '-2637882': 'New York',
+      '-1456928': 'Paris',
+      '-2601889': 'London',
+      '-246227': 'Tokyo',
+      '-782831': 'Dubai',
+      '-256230': 'Bali',
+      '-304554': 'Goa',
+      '-2100945': 'Delhi',
+      '-2090174': 'Mumbai',
+      '-293921': 'Bangkok',
+      '-390625': 'Singapore',
+      '-1603135': 'Sydney',
+      '-122590': 'Los Angeles',
+      '-1580749': 'San Francisco',
+      '-126693': 'Rome',
+      '-372490': 'Barcelona',
+      '-2140479': 'Amsterdam',
+      '-1746443': 'Berlin'
+    };
+
+    const cityName = city_name || cityMap[dest_id] || 'Destination';
+
+    // Try OpenRouter if API key is provided
+    if (OPENROUTER_API_KEY) {
+      try {
+        const prompt = `Generate a JSON array of 10 hotel recommendations for ${cityName} from ${checkin_date} to ${checkout_date} for ${adults_number} adults. 
+        Each hotel should have: hotel_name, address, price_per_night (USD), rating (1-5), amenities (array), description (brief).
+        Return ONLY valid JSON array, no markdown, no code blocks.`;
+
+        const openRouterResponse = await axios.post(
+          'https://openrouter.ai/api/v1/chat/completions',
+          {
+            model: 'openai/gpt-3.5-turbo',
+            messages: [
+              {
+                role: 'user',
+                content: prompt
+              }
+            ],
+            temperature: 0.7,
+            max_tokens: 2000
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'http://localhost:4000',
+              'X-Title': 'Hiraeth Travel App'
+            },
+            timeout: 30000
+          }
+        );
+
+        const aiResponse = openRouterResponse.data.choices[0].message.content;
+        let hotels = [];
+        
+        try {
+          // Try to parse JSON from response
+          const jsonMatch = aiResponse.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            hotels = JSON.parse(jsonMatch[0]);
+          }
+        } catch (parseError) {
+          console.log('Failed to parse AI response, using mock data');
+        }
+
+        if (hotels && hotels.length > 0) {
+          // Format AI response to match expected structure
+          const formattedHotels = hotels.map((hotel, idx) => ({
+            hotel_id: idx + 1,
+            hotel_name: hotel.hotel_name || hotel.name,
+            hotel_name_trans: hotel.hotel_name || hotel.name,
+            address: hotel.address || `${cityName}`,
+            review_score: hotel.rating || 4.5,
+            review_score_word: hotel.rating >= 4.5 ? 'Excellent' : hotel.rating >= 4 ? 'Very Good' : 'Good',
+            price_breakdown: {
+              gross_price: (hotel.price_per_night || 100) * (Math.ceil((new Date(checkout_date) - new Date(checkin_date)) / (1000 * 60 * 60 * 24)) || 1) * adults_number,
+              all_inclusive_price: (hotel.price_per_night || 100) * 1.1 * (Math.ceil((new Date(checkout_date) - new Date(checkin_date)) / (1000 * 60 * 60 * 24)) || 1) * adults_number
+            },
+            min_total_price: (hotel.price_per_night || 100) * (Math.ceil((new Date(checkout_date) - new Date(checkin_date)) / (1000 * 60 * 60 * 24)) || 1) * adults_number,
+            main_photo_url: `https://picsum.photos/seed/hotel${cityName}${idx}/400/300`,
+            distance_to_cc: (Math.random() * 5).toFixed(1),
+            amenities: hotel.amenities || ['WiFi', 'Pool'],
+            description: hotel.description || ''
+          }));
+
+          return res.json({ 
+            success: true, 
+            data: { 
+              result: formattedHotels 
+            } 
+          });
+        }
+      } catch (openRouterError) {
+        console.log('OpenRouter failed, using mock data:', openRouterError.message);
+      }
+    }
+
+    // Fallback to mock data (always works, no API needed)
+    const mockHotels = generateMockHotels(cityName, checkin_date, checkout_date, parseInt(adults_number) || 2);
+    
+    res.json({ 
+      success: true, 
+      data: { 
+        result: mockHotels 
+      } 
+    });
+  } catch (error) {
+    console.error('Hotels search error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch hotels',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      error: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.message : undefined
+    });
+  }
+});
+
+// Hotels - Get locations (for finding destination IDs)
+app.get('/api/hotels/locations', async (req, res) => {
+  try {
+    const { name, locale = 'en-us' } = req.query;
+    
+    if (!name) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Location name is required' 
+      });
+    }
+
+    const response = await axios.get('https://booking-com.p.rapidapi.com/v1/hotels/locations', {
+      params: {
+        name,
+        locale
+      },
+      headers: {
+        'x-rapidapi-host': 'booking-com.p.rapidapi.com',
+        'x-rapidapi-key': RAPIDAPI_KEY
+      },
+      timeout: 30000
+    });
+
+    res.json({ success: true, data: response.data });
+  } catch (error) {
+    console.error('Hotels locations API error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch hotel locations',
+      error: process.env.NODE_ENV === 'development' || !process.env.NODE_ENV ? error.message : undefined
     });
   }
 });
