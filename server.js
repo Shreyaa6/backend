@@ -46,10 +46,10 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 204
 };
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '85c7d87effmsh63cf2d93801c02bp1a6854jsn90dcf15b1890';
-const EXCHANGE_API_KEY = process.env.EXCHANGE_API_KEY || '9ea2e355dc46cdf4585fbc76';
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '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';
+const JWT_SECRET = process.env.JWT_SECRET;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY ;
+const EXCHANGE_API_KEY = process.env.EXCHANGE_API_KEY ;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ;
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
